@@ -12,12 +12,7 @@
 These rules apply in every project. `~/.codex` below means the codex directory: `CODEX_HOME` if
 set, otherwise `~/.codex`.
 
-There is no codex MCP server: codex-cli 0.155.1 removed the `mcp-server` subcommand
-(`codex mcp-server` falls through to the interactive TUI and dies with `stdin is not a terminal`).
-`codex app-server` is a JSON-RPC daemon with its own protocol, not MCP, and is not a replacement.
-Do not downgrade codex to get `mcp-server` back: older builds do not serve current models
-(`gpt-6-astra` was refused that way on 2026-09-05).
-codex is called through Bash, only through the wrapper.
+codex is called only as a CLI (codex-cli 0.155.1, `@openai/codex` via npm); there is no MCP integration. **Do not downgrade codex** - older builds reject current models. `codex app-server` is a JSON-RPC daemon with its own protocol and is not used.
 
 ### Calls - always through the wrapper
 
@@ -128,7 +123,7 @@ policy, is not changed on resume.
 ### Error messages
 
 - `stdin is not a terminal` - a codex subcommand that does not exist fell through to the
-  interactive TUI (this is how the removed `mcp-server` fails). See `codex --help`.
+  interactive TUI. See `codex --help`.
 - `'<model>' is not supported when using Codex with a ChatGPT account` - wrong slug, or the plan's
   model list changed; see the model rule.
 - `The '<model>' model requires a newer version of Codex` - the installed CLI is too old for the
