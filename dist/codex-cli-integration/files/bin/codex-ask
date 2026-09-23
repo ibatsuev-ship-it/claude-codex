@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""codex-ask - call the codex CLI from Claude Code with exact thread ownership.
+
+  codex-ask new    [options] PROMPT_FILE
+  codex-ask resume [options] SESSION_ID PROMPT_FILE
+
+Runs `codex exec --json` (or `codex exec resume --json`), takes the session id
+from the `thread.started` event, keeps events / stderr / final answer in a
+fresh per-call directory, and after codex exits scans only this call's part of
+the thread's rollout for context compactions. Prints `out_dir` first, then a
+summary and the answer. Exit status: codex's own; 75 when the thread is busy;
+128+N when codex died from signal N; 1 when codex exited 0 but the turn did
+not complete.
+
+Cooperating codex-ask calls on one thread are serialized by a per-thread lock
+(a second caller gets 75 at once). A writer outside codex-ask can still race
+the compaction offset; codex itself refuses concurrent writers.
+
+Standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+DEFAULT_MODEL = "gpt-6-astra"  # set by the installer; see the codex rules in ~/.claude/CLAUDE.md
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+EXIT_BUSY = 75
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+BUSY_TEXT = "already has an active writer"
+
+
+def say(line: str = "") -> None:
+    print(line, flush=True)
+
+
+def codex_home() -> Path:
+    raw = os.environ.get("CODEX_HOME")
+    return Path(raw).expanduser().resolve() if raw else (Path.home() / ".codex").resolve()
+
+
+def rollout_id(path: Path) -> str | None:
+    try:
+        with path.open("rb") as fh:
+            ev = json.loads(fh.readline())
+        payload = ev.get("payload") if isinstance(ev, dict) else None
+        return payload.get("id") if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def find_rollout(home: Path, session_id: str) -> Path | None:
+    """The rollout whose session_meta id equals session_id (newest if several)."""
+    sessions = home / "sessions"
+    if not sessions.is_dir():
+        return None
+    hits = [p for p in sessions.rglob(f"rollout-*{session_id}.jsonl") if rollout_id(p) == session_id]
+    if not hits:
+        return None
+    return max(hits, key=lambda p: p.stat().st_mtime)
+
+
+def snapshot(path: Path) -> tuple[int, int]:
+    """(inode, offset just past the last newline) of a rollout."""
+    st = path.stat()
+    pos = st.st_size
+    with path.open("rb") as fh:
+        while pos > 0:
+            step = min(pos, 1 << 20)
+            fh.seek(pos - step)
+            nl = fh.read(step).rfind(b"\n")
+            if nl >= 0:
+                return st.st_ino, pos - step + nl + 1
+            pos -= step
+    return st.st_ino, 0
+
+
+def _epoch(ts: str) -> float | None:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def scan_compactions(path: Path, offset: int) -> list[str]:
+    """Compactions after offset. codex writes one compaction as a `compacted`
+    record followed within milliseconds by a `context_compacted` event; such a
+    pair counts once, an unpaired record or event counts on its own."""
+    found: list[str] = []
+    open_record: float | None = None  # epoch of a record still waiting for its event
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        for raw in fh:
+            if not raw.endswith(b"\n") or b"compact" not in raw:
+                continue
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            payload = ev.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
+            ts = str(ev.get("timestamp") or payload.get("timestamp") or "?")
+            t = _epoch(ts)
+            if ev.get("type") == "compacted":
+                found.append(ts)
+                open_record = t
+            elif payload.get("type") == "context_compacted":
+                paired = open_record is not None and t is not None and 0 <= t - open_record <= 5
+                if not paired:
+                    found.append(ts)
+                open_record = None
+    return found
+
+
+def parse_events(path: Path) -> tuple[list[str], dict, list[str], bool, bool]:
+    """(thread ids seen, usage, error messages, turn completed, turn failed)."""
+    ids: list[str] = []
+    usage: dict = {}
+    errors: list[str] = []
+    completed = failed = False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                kind = ev.get("type")
+                if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
+                    ids.append(ev["thread_id"])
+                elif kind == "turn.completed":
+                    completed = True
+                    if isinstance(ev.get("usage"), dict):
+                        usage = ev["usage"]
+                elif kind in ("turn.failed", "error"):
+                    failed = failed or kind == "turn.failed"
+                    err = ev.get("error") if isinstance(ev.get("error"), dict) else ev
+                    msg = err.get("message") if isinstance(err, dict) else None
+                    errors.append(str(msg or err))
+    except OSError:
+        pass
+    return ids, usage, list(dict.fromkeys(errors)), completed, failed
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="codex-ask", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="mode", required=True)
+    for name in ("new", "resume"):
+        p = sub.add_parser(name)
+        if name == "resume":
+            p.add_argument("session_id")
+        p.add_argument("prompt_file")
+        p.add_argument("--dir", default=".", help="directory codex runs in (default: current)")
+        p.add_argument("--out", help="parent for the per-call output dir (default: the prompt's dir)")
+        if name == "new":
+            p.add_argument("--model", default=DEFAULT_MODEL)
+            p.add_argument("--sandbox", default="read-only",
+                           choices=["read-only", "workspace-write", "danger-full-access"])
+            p.add_argument("--network", action="store_true",
+                           help="allow network; requires --sandbox workspace-write")
+            p.add_argument("--effort", choices=EFFORTS, help="reasoning effort override")
+    a = ap.parse_args()
+
+    if a.mode == "new" and a.network and a.sandbox != "workspace-write":
+        ap.error("--network requires --sandbox workspace-write")
+    session_arg = None
+    if a.mode == "resume":
+        session_arg = a.session_id.strip().lower()
+        if not UUID_RE.match(session_arg):
+            ap.error(f"not a session UUID: {a.session_id}")
+
+    prompt = Path(a.prompt_file).expanduser().resolve()
+    if not prompt.is_file():
+        ap.error(f"prompt file not found: {prompt}")
+    run_dir = Path(a.dir).expanduser().resolve()
+    if not run_dir.is_dir():
+        ap.error(f"--dir is not a directory: {run_dir}")
+    home = codex_home()
+    env = dict(os.environ, CODEX_HOME=str(home))
+
+    parent = Path(a.out).expanduser().resolve() if a.out else prompt.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    out = parent / f"codex-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}-{secrets.token_hex(3)}"
+    out.mkdir()  # exclusive: never reuse another call's directory
+    events, stderr_log, answer = out / "events.jsonl", out / "stderr.log", out / "answer.md"
+    say(f"out_dir: {out}")
+
+    lock_fh = None
+    before = None  # (path, inode, offset) of the resumed rollout
+    if session_arg:
+        lock_dir = Path.home() / ".cache" / "codex-ask" / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_fh = (lock_dir / f"{session_arg}.lock").open("a")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say(f"session_id: {session_arg}")
+            say(f"status: FAILED (exit {EXIT_BUSY})")
+            say("BUSY: another codex-ask call is using this thread right now - wait for it, "
+                "do not start a second writer.")
+            return EXIT_BUSY
+        try:
+            path = find_rollout(home, session_arg)
+            if path is not None:
+                ino, off = snapshot(path)
+                before = (path, ino, off)
+        except OSError:
+            before = None
+
+    cmd = ["codex", "exec"]
+    if session_arg:
+        cmd += ["resume"]
+    cmd += ["--json", "--skip-git-repo-check", "-o", str(answer)]
+    if a.mode == "new":
+        cmd += ["--model", a.model, "--sandbox", a.sandbox, "-C", str(run_dir)]
+        if a.network:
+            cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+        if a.effort:
+            cmd += ["-c", f'model_reasoning_effort="{a.effort}"']
+        cmd += ["-"]
+    else:
+        cmd += [session_arg, "-"]
+
+    child: subprocess.Popen | None = None
+    stop_signal = [0]
+
+    def forward(signum, _frame):
+        stop_signal[0] = signum
+        if child is not None:
+            try:
+                os.killpg(child.pid, signum)
+            except OSError:
+                pass
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, forward)
+
+    try:
+        with prompt.open("rb") as stdin, events.open("wb") as ev_fh, stderr_log.open("wb") as err_fh:
+            child = subprocess.Popen(cmd, stdin=stdin, stdout=ev_fh, stderr=err_fh,
+                                     cwd=run_dir, env=env, start_new_session=True)
+            deadline = None
+            while True:
+                try:
+                    rc = child.wait(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if stop_signal[0]:
+                        deadline = deadline or time.monotonic() + 10
+                        if time.monotonic() > deadline:
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+            if stop_signal[0]:
+                # The direct child is gone; stop anything left in its process group.
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(child.pid, sig)
+                    except OSError:
+                        break
+                    time.sleep(0.5)
+    except FileNotFoundError:
+        say("status: FAILED (exit 127)")
+        say("error: `codex` not found in PATH")
+        return 127
+    except OSError as exc:
+        say("status: FAILED (exit 1)")
+        say(f"error: could not start codex: {exc}")
+        return 1
+
+    if rc < 0:
+        rc = 128 - rc
+    ids, usage, errors, completed, failed = parse_events(events)
+    err_text = stderr_log.read_text(encoding="utf-8", errors="replace")
+    busy = rc != 0 and (BUSY_TEXT in err_text or any(BUSY_TEXT in e for e in errors))
+    if stop_signal[0]:
+        rc = 128 + stop_signal[0]
+    elif busy:
+        rc = EXIT_BUSY
+    elif rc == 0 and (failed or not completed):
+        rc = 1
+
+    notes: list[str] = []
+    distinct = list(dict.fromkeys(ids))
+    identity_ok = len(distinct) == 1 and bool(UUID_RE.match(distinct[0])) and (
+        session_arg is None or distinct[0] == session_arg)
+    if identity_ok:
+        session_id = distinct[0]
+    else:
+        session_id = None
+        if not busy and rc == 0:
+            rc = 1  # protocol failure: the answer cannot be tied to a known thread
+        if distinct:
+            notes.append("thread identity check failed: event stream reported "
+                         f"{', '.join(distinct)}" + (f", requested {session_arg}" if session_arg else ""))
+        elif not busy:
+            notes.append("no thread.started event - the session id is unknown")
+
+    # Compactions during this call.
+    if busy or not session_id:
+        compaction_line = "compactions: not checked"
+    else:
+        try:
+            rollout = find_rollout(home, session_id)
+            if rollout is None:
+                compaction_line = f"compactions: unknown (no rollout for this thread under {home}/sessions)"
+            else:
+                offset, whole = 0, ""
+                if session_arg:
+                    if before is None:
+                        whole = "rollout was not found before the call"
+                    elif before[0] != rollout:
+                        whole = "rollout path changed during the call"
+                    else:
+                        st = rollout.stat()
+                        if st.st_ino == before[1] and st.st_size >= before[2]:
+                            offset = before[2]
+                        else:
+                            whole = "rollout was replaced or truncated"
+                found = scan_compactions(rollout, offset)
+                if whole:
+                    compaction_line = (
+                        f"COMPACTED (whole thread history scanned - {whole}; these may predate this call): "
+                        f"{len(found)}x ({', '.join(found)})" if found
+                        else f"compactions: none in the whole thread history ({whole})")
+                else:
+                    compaction_line = (
+                        f"COMPACTED: codex compacted this thread's context during this call {len(found)}x "
+                        f"({', '.join(found)}). Earlier detail may survive only as its summary - "
+                        "resend the evidence if an answer depends on it." if found else "compactions: none")
+        except OSError as exc:
+            compaction_line = f"compactions: unknown ({exc})"
+    if lock_fh is not None:
+        lock_fh.close()
+
+    say(f"session_id: {session_id or 'UNKNOWN'}")
+    say(f"status: {'ok' if rc == 0 else 'FAILED'} (exit {rc})")
+    if stop_signal[0]:
+        say(f"interrupted: codex-ask received signal {stop_signal[0]} and passed it to codex")
+    if usage:
+        say("usage: input {} (cached {}), output {}, reasoning {}".format(
+            usage.get("input_tokens"), usage.get("cached_input_tokens"),
+            usage.get("output_tokens"), usage.get("reasoning_output_tokens")))
+    say(compaction_line)
+    if busy:
+        say("BUSY: another process is writing to this thread right now - wait for it, "
+            "do not start a second writer.")
+    for n in notes:
+        say(f"warning: {n}")
+    for e in errors[-3:]:
+        say(f"error: {e}")
+    if rc != 0:
+        tail = [l for l in err_text.splitlines() if l.strip()][-8:]
+        if tail:
+            say("stderr (tail):")
+            for l in tail:
+                say(f"  {l}")
+    if answer.is_file() and answer.stat().st_size:
+        say("----- answer -----" if rc == 0 else "----- answer (run FAILED - may be incomplete) -----")
+        say(answer.read_text(encoding="utf-8", errors="replace").rstrip())
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

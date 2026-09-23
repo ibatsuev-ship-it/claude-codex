@@ -1,0 +1,24 @@
+{
+  "_комментарий": "Влить в ~/.claude/settings.json, не затирая существующие ключи. Если hooks.PostToolUse уже есть — добавить элемент в массив, а не заменить его. Сам этот файл целиком копировать поверх настроек НЕЛЬЗЯ.",
+
+  "env": {
+    "MCP_TOOL_TIMEOUT": "7200000",
+    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "0"
+  },
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__codex__codex|mcp__codex__codex-reply",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/codex-compact-watcher.py\"",
+            "timeout": 5,
+            "statusMessage": "Checking codex for context compaction"
+          }
+        ]
+      }
+    ]
+  }
+}
