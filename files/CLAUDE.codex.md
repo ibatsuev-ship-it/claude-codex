@@ -1,137 +1,138 @@
-<!-- ================= codex CLI - блок для ~/.claude/CLAUDE.md ================= -->
-<!-- ПЕРЕД ВСТАВКОЙ заполнить плейсхолдеры:                                      -->
-<!--   <MODEL>    - слаг, подтверждённый `codex exec --skip-git-repo-check ...`   -->
-<!--   <FALLBACK> - запасной слаг                                                 -->
-<!-- Проверено 23.09.2026: <MODEL> = gpt-6-astra, <FALLBACK> = gpt-5.6-sol              -->
-<!-- Если основной стала сама запасная модель - удалить ВСЕ упоминания <FALLBACK>: -->
-<!-- оговорку в списке запретов и абзац про переход на запасную. Их два.          -->
+<!-- ================= codex CLI - block for ~/.claude/CLAUDE.md ================= -->
+<!-- BEFORE INSERTING fill in the placeholders:                                    -->
+<!--   <MODEL>    - the slug confirmed by `codex exec --skip-git-repo-check ...`   -->
+<!--   <FALLBACK> - the fallback slug                                              -->
+<!-- Verified 2026-09-23: <MODEL> = gpt-6-astra, <FALLBACK> = gpt-5.6-sol         -->
+<!-- If the fallback itself became the primary, delete EVERY mention of <FALLBACK>: -->
+<!-- the note in the list of forbidden values and the paragraph about switching   -->
+<!-- to the fallback. There are two.                                              -->
 
-## codex (CLI через `~/.claude/bin/codex-ask`)
+## codex (CLI through `~/.claude/bin/codex-ask`)
 
-Правила действуют во всех проектах. `~/.codex` ниже - каталог codex: `CODEX_HOME`, если он
-задан, иначе `~/.codex`.
+These rules apply in every project. `~/.codex` below means the codex directory: `CODEX_HOME` if
+set, otherwise `~/.codex`.
 
-MCP-сервера codex больше нет: в codex-cli 0.155.1 убрали подкоманду `mcp-server`
-(`codex mcp-server` проваливается в интерактивный режим и падает с `stdin is not a terminal`).
-`codex app-server` - JSON-RPC демон со своим протоколом, не MCP, заменой не является.
-Не откатывай codex на старую версию ради `mcp-server`: старые сборки не обслуживают свежие
-модели (так `gpt-6-astra` отказала 05.09.2026).
-codex вызывается через Bash, только через обёртку.
+There is no codex MCP server: codex-cli 0.155.1 removed the `mcp-server` subcommand
+(`codex mcp-server` falls through to the interactive TUI and dies with `stdin is not a terminal`).
+`codex app-server` is a JSON-RPC daemon with its own protocol, not MCP, and is not a replacement.
+Do not downgrade codex to get `mcp-server` back: older builds do not serve current models
+(`gpt-6-astra` was refused that way on 2026-09-05).
+codex is called through Bash, only through the wrapper.
 
-### Вызовы - всегда через обёртку
+### Calls - always through the wrapper
 
-`~/.claude/bin/codex-ask` (Python, только стандартная библиотека) оборачивает `codex exec --json`:
-берёт id сессии из события `thread.started`, складывает события, stderr и финальный ответ в
-новый каталог на каждый вызов, после завершения проверяет свою часть rollout-файла треда на
-сжатие контекста, печатает сначала `out_dir`, потом сводку и ответ.
-Код выхода: собственный codex; 75 - тред занят; 128+N - остановлен сигналом N (обёртка
-передаёт SIGTERM/SIGINT/SIGHUP в codex, так что блокировка треда освобождается); 1 - codex
-вышел с 0, но ход не завершился или поток событий не подтвердил запрошенный тред
-(тогда `session_id: UNKNOWN`). Вызовы `codex-ask` на один тред сериализуются блокировкой в
-`~/.cache/codex-ask/locks/`. Промпт сначала пишется в файл.
+`~/.claude/bin/codex-ask` (Python, standard library only) wraps `codex exec --json`: it takes the
+session id from the `thread.started` event, writes events, stderr and the final answer into a fresh
+directory per call, checks its own part of the thread's rollout file for context compaction after
+the run, and prints `out_dir` first, then the summary and the answer.
+Exit status: codex's own; 75 - thread busy; 128+N - stopped by signal N (the wrapper forwards
+SIGTERM/SIGINT/SIGHUP to codex, so the thread lock is released); 1 - codex exited 0 but the turn
+did not complete or the event stream did not confirm the requested thread (then
+`session_id: UNKNOWN`). `codex-ask` calls on one thread are serialized by a lock in
+`~/.cache/codex-ask/locks/`. Write the prompt to a file first.
 
-- **Новый тред:** `~/.claude/bin/codex-ask new --dir <каталог проекта> <файл промпта>`.
-  По умолчанию `--model <MODEL>` (зашита в обёртку) и `--sandbox read-only`. Опции:
-  `--effort xhigh` (только по просьбе пользователя), `--sandbox workspace-write` (только если
-  codex должен править файлы и пользователь согласен), `--network` (только с workspace-write),
-  `--out <каталог>`.
-- **Продолжение треда:** `~/.claude/bin/codex-ask resume <session_id> --dir <тот же каталог> <файл промпта>`.
-  Обёртка не передаёт на resume ни `--model`, ни `-c`: CLI принял бы переопределение, но
-  модель, песочница и effort должны остаться такими, какими тред создан.
-- Сводка: `session_id`, `status`, `COMPACTED` (codex сжал контекст во время этого вызова -
-  ранние детали могли остаться только в его пересказе; если ответ от них зависит, пришли
-  данные заново), `COMPACTED (whole thread history scanned …)` (rollout не удалось ограничить этим вызовом -
-  события могут быть старше), `compactions: unknown / not checked` (rollout не найден, вызов был
-  занят или не сошёлся id треда - это не то же самое, что «сжатий не было»), `BUSY`, строки `warning:` / `error:`, затем ответ.
-  Ответ упавшего вызова помечен как возможно неполный. Полные события и stderr лежат в `out_dir`.
-- Bash-инструмент Claude Code обрывает команду переднего плана через 10 минут. Длинные ревью
-  (xhigh, большие диффы) запускай с `run_in_background: true`, stdout обёртки перенаправляй в
-  файл и читай его по уведомлению о завершении. Если обёртку убили SIGKILL, сводки нет -
-  смотри `out_dir` (он напечатан первым).
-- Никогда `--ephemeral` (без rollout не работают ни resume, ни проверка сжатия) и никогда
-  `codex exec resume --last` (берёт самую свежую сессию каталога, она может быть чужой).
-- Профили: в 0.155.1 `-p NAME` подмешивает файл `$CODEX_HOME/NAME.config.toml`; старые таблицы
-  `[profiles.*]` в `config.toml` - не то, что грузит `-p`. Обёртка профилей не использует.
-- Голый `codex exec` без обёртки работает, но теряет id сессии и проверку сжатия - только для
-  разовых проб.
+- **New thread:** `~/.claude/bin/codex-ask new --dir <project dir> <prompt file>`.
+  Defaults: `--model <MODEL>` (built into the wrapper) and `--sandbox read-only`. Options:
+  `--effort xhigh` (only when the user asks), `--sandbox workspace-write` (only when codex must
+  edit files and the user agreed), `--network` (only with workspace-write), `--out <dir>`.
+- **Continue a thread:** `~/.claude/bin/codex-ask resume <session_id> --dir <same dir> <prompt file>`.
+  The wrapper passes neither `--model` nor `-c` on resume: the CLI would accept an override, but
+  model, sandbox and effort must stay as the thread was created.
+- Summary: `session_id`, `status`, `COMPACTED` (codex compacted its context during this call -
+  earlier details may survive only in its own summary; if the answer depends on them, send the
+  evidence again), `COMPACTED (whole thread history scanned …)` (the rollout could not be bounded
+  to this call, so the events may be older), `compactions: unknown / not checked` (the rollout was
+  not found, the call was busy or the thread id did not match - not the same as "no compactions"),
+  `BUSY`, `warning:` / `error:` lines, then the answer.
+  The answer of a failed call is marked as possibly incomplete. Full events and stderr are in `out_dir`.
+- The Claude Code Bash tool cuts a foreground command off after 10 minutes. Run long reviews
+  (xhigh, big diffs) with `run_in_background: true`, redirect the wrapper's stdout to a file and
+  read it when the completion notification arrives. If the wrapper was killed with SIGKILL there
+  is no summary - look in `out_dir` (printed first).
+- Never `--ephemeral` (without a rollout neither resume nor the compaction check works) and never
+  `codex exec resume --last` (it takes the newest session for the directory, which may belong to
+  someone else).
+- Profiles: in 0.155.1 `-p NAME` layers the file `$CODEX_HOME/NAME.config.toml`; the old
+  `[profiles.*]` tables in `config.toml` are not what `-p` loads. The wrapper uses no profile.
+- A bare `codex exec` without the wrapper works but loses the session id and the compaction check -
+  only for one-off probes.
 
-### Песочница (проверено на 0.155.1)
+### Sandbox (verified on 0.155.1)
 
-- Песочница ограничивает команды агента codex. Сам клиент codex всё равно пишет rollout,
-  обновляет авторизацию и для git-репозиториев добавляет записи доверия в `~/.codex/config.toml`.
-- `read-only`: команды агента не пишут никуда, включая проект, и не ходят в сеть. `exec` никогда
-  не спрашивает подтверждений, поэтому эскалация отклоняется сразу, зависаний нет,
-  `danger-full-access` не нужен.
-- `workspace-write` + `--network`: запись в каталог запуска (плюс temp и настроенные корни
-  записи) и сеть. Нужна сеть без права писать в проект - запускай с `--dir` во временном
-  каталоге вне проекта.
+- The sandbox restricts the commands codex's agent runs. The codex client itself still writes the
+  rollout, refreshes auth and, for git repositories, adds trust entries to `~/.codex/config.toml`.
+- `read-only`: agent commands cannot write anywhere, project included, and have no network. `exec`
+  never asks for approval, so an escalation is refused at once, nothing hangs, and
+  `danger-full-access` is not needed.
+- `workspace-write` + `--network`: writes inside the run directory (plus temp and any configured
+  writable roots) and network. For network without write access to the project, run with `--dir`
+  set to a temporary directory outside the project.
 
-### Модель - жёсткое правило
+### Model - hard rule
 
-Каждый новый тред идёт на `<MODEL>` (умолчание обёртки). Другие значения - только по правилу о
-запасной модели ниже.
+Every new thread uses `<MODEL>` (the wrapper default). Other values only under the fallback rule
+below.
 
-- Никаких сокращений и вариаций (`astra`, `gpt-6`, `gpt-6-astra-codex`, `gpt-5.6`, `gpt-5.6-codex`, `gpt-5-codex`).
-  `<FALLBACK>` - запасной вариант на случай отказа, а не значение по умолчанию.
-- Аккаунт - ChatGPT-план. Слаг берётся из `~/.codex/models_cache.json` (поле `slug`),
-  отображаемое имя идентификатором не является.
-- `~/.codex/config.toml` тоже пинит `model = "<MODEL>"`.
-- На `'<модель>' is not supported when using Codex with a ChatGPT account`: повтори один раз на
-  новом треде; если снова отказ - `codex-ask new --model <FALLBACK>` и скажи пользователю, что
-  основная модель отвалилась.
+- No abbreviations or variations (`astra`, `gpt-6`, `gpt-6-astra-codex`, `gpt-5.6`, `gpt-5.6-codex`, `gpt-5-codex`).
+  `<FALLBACK>` is the fallback in case of refusal, not a default.
+- The account is a ChatGPT plan. The slug comes from `~/.codex/models_cache.json` (field `slug`);
+  the display name is not an identifier.
+- `~/.codex/config.toml` also pins `model = "<MODEL>"`.
+- On `'<model>' is not supported when using Codex with a ChatGPT account`: retry once on a fresh
+  thread; if it is refused again, use `codex-ask new --model <FALLBACK>` and tell the user that the
+  primary model is broken.
 
-### Один тред на поток задач
+### One thread per task flow
 
-В рамках связной задачи (ревью одного среза в несколько заходов; спек-ревью и код-ревью одного
-коммита; «объясни -> почини -> проверь» по одному скоупу) все вызовы идут в один тред:
-один `codex-ask new`, дальше `codex-ask resume <session_id>`.
+Within one coherent task (reviews of one slice across several rounds; spec review and code review
+of one commit; "explain -> fix -> verify" on one scope) all calls go to one thread: one
+`codex-ask new`, then `codex-ask resume <session_id>`.
 
-Зачем: кэш промпта OpenAI префиксный. Продолжение треда сохраняет прежний разговор как
-одинаковое начало запроса, и он скорее попадёт в кэш; новый тред отправляет контекст проекта
-заново и обычно платит за него снова. Замер 2026-04-28: два свежих треда подряд дали примерно
-вдвое большее время вывода, чем один общий. Попадание не гарантировано никогда (кэш истекает,
-изменившийся контекст ломает префикс).
+Why: the OpenAI prompt cache matches request prefixes. Continuing a thread keeps the earlier
+conversation as an identical prefix, which is likely to hit the cache; a new thread sends the
+project context again and usually pays for it again. Measured 2026-04-28: two fresh threads back
+to back took roughly twice the inference time of one shared thread. A hit is never guaranteed
+(the cache expires, and changed context breaks the prefix).
 
-### Когда заводить новый тред
+### When to start a new thread
 
-Упавший вызов сам по себе тред не портит: rollout сохранён, а блокировка писателя не даёт
-вызовам перемешаться. Решай по причине:
+A failed call does not by itself corrupt the thread: the rollout is persisted and the writer lock
+keeps calls from interleaving. Decide by cause:
 
-- `BUSY` (код 75): тредом сейчас пользуется другой процесс. Дождись его (сначала проверь свои
-  фоновые задачи); второго писателя не запускай.
-- Ошибки авторизации, сети, лимитов, таймаута: устрани причину и сделай `resume` того же треда;
-  проверь, что ответ закрывает весь вопрос. Перед повтором после таймаута или убийства
-  убедись, что прежний запуск закончился (нет `BUSY`); для записывающей песочницы сначала
-  посмотри, что он уже успел изменить.
-- codex сам сообщает, что сессия не найдена: новый тред, нужные данные прислать заново.
-  `compactions: unknown` само по себе не значит, что тред пропал (проверь `CODEX_HOME` и права).
-- Новый тред намеренно - когда нужно сменить модель, каталог или песочницу, тема резко
-  сменилась, или после `COMPACTED` тред продолжает отвечать по утерянным деталям. Данные
-  приложи в новом треде: пустой новый тред их не вернёт.
+- `BUSY` (exit 75): another process is using the thread. Wait for it (check your own background
+  tasks first); do not start a second writer.
+- Auth, network, rate-limit or timeout errors: fix the cause and `resume` the same thread; check
+  that the answer covers the whole question. Before retrying after a timeout or a kill, make sure
+  the previous run has ended (no `BUSY`); for a writable sandbox, first look at what it already changed.
+- codex itself reports the session cannot be found: new thread, send the needed evidence again.
+  `compactions: unknown` alone does not mean the thread is gone (check `CODEX_HOME` and permissions).
+- A new thread on purpose: when the model, directory or sandbox must change, the topic shifts
+  radically, or after `COMPACTED` the thread keeps answering from lost details. Attach the
+  evidence in the new thread: an empty new thread does not bring it back.
 
-### Параллельные сессии Claude
+### Parallel Claude sessions
 
-- Разные треды параллельно работают без конфликтов. Одновременная запись в один тред
-  отклоняется (`already has an active writer`, код 75), rollout не портится.
-- Все сессии делят одну квоту ChatGPT-плана и один `~/.codex/auth.json`. На лимит - пауза и
-  повтор позже, а не долбёжка. На `Your access token could not be refreshed…` - один повтор;
-  если не прошло, попроси пользователя один раз выполнить `! codex login`. Не запускай вход из
-  нескольких сессий и не бросай треды из-за этого.
+- Separate threads run in parallel without conflict. Concurrent writes to one thread are refused
+  (`already has an active writer`, exit 75); the rollout stays intact.
+- All sessions share one ChatGPT plan quota and one `~/.codex/auth.json`. On a rate limit, pause
+  and retry later instead of hammering. On `Your access token could not be refreshed…`, retry
+  once; if it persists, ask the user to run `! codex login` once. Do not run logins from several
+  sessions and do not abandon threads over it.
 
-### Глубина рассуждений
+### Reasoning effort
 
-Умолчание - `high` из `~/.codex/config.toml`. `--effort xhigh` - только когда пользователь явно
-просит для конкретного ревью. Effort задаётся при создании треда и, по правилу обёртки, на
-resume не меняется.
+The default is `high` from `~/.codex/config.toml`. `--effort xhigh` only when the user explicitly
+asks for it for a specific review. Effort is set when the thread is created and, by wrapper
+policy, is not changed on resume.
 
-### Сообщения об ошибках
+### Error messages
 
-- `stdin is not a terminal` - несуществующая подкоманда codex провалилась в интерактивный
-  режим (так падает удалённый `mcp-server`). Смотри `codex --help`.
-- `'<модель>' is not supported when using Codex with a ChatGPT account` - неверный слаг или
-  изменилось обслуживание плана; см. правило о модели.
-- `The '<модель>' model requires a newer version of Codex` - установленный CLI слишком старый
-  для модели. Обнови codex.
-- `Your access token could not be refreshed…` - см. «Параллельные сессии».
-- `already has an active writer` - см. `BUSY`.
-<!-- ============================ конец блока codex ============================ -->
+- `stdin is not a terminal` - a codex subcommand that does not exist fell through to the
+  interactive TUI (this is how the removed `mcp-server` fails). See `codex --help`.
+- `'<model>' is not supported when using Codex with a ChatGPT account` - wrong slug, or the plan's
+  model list changed; see the model rule.
+- `The '<model>' model requires a newer version of Codex` - the installed CLI is too old for the
+  model. Update codex.
+- `Your access token could not be refreshed…` - see "Parallel Claude sessions".
+- `already has an active writer` - see `BUSY`.
+<!-- ============================ end of codex block ============================ -->

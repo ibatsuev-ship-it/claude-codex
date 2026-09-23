@@ -1,47 +1,47 @@
 ---
 name: codex-cli
-description: Подключить (подрубить) codex к Claude Code через CLI-обёртку codex-ask - «подруби кодекс», «подключи codex», «настрой codex», «почини codex», «codex mcp сломался». Ставит обёртку ~/.claude/bin/codex-ask, прописывает правила в ~/.claude/CLAUDE.md, снимает остатки старой MCP-связки (codex mcp-server удалён в codex-cli 0.155.1) и проверяет всё дымовым тестом. Вызывать также при поломках codex и для обновления уже установленной связки - скилл идемпотентен и содержит таблицу диагностики.
+description: Connect codex to Claude Code through the codex-ask CLI wrapper - "set up codex", "connect codex", "configure codex", "fix codex", "codex mcp is broken" (also in Russian - «подруби кодекс», «подключи codex», «почини codex»). Installs the ~/.claude/bin/codex-ask wrapper, writes the rules into ~/.claude/CLAUDE.md, removes leftovers of the old MCP setup (codex mcp-server was removed in codex-cli 0.155.1) and verifies everything with a smoke test. Also use it when codex breaks and to update an existing installation - the skill is idempotent and has a diagnostics table.
 ---
 
 # codex CLI -> Claude Code
 
-Ставит, обновляет и чинит связку «Claude Code спрашивает codex». Файлы пакета лежат рядом с
-этим SKILL.md (`files/` на уровень выше `skill/`) либо в `~/.claude/codex-cli/` после установки.
-Дальше этот каталог зовётся `$PKG`.
+Installs, updates and repairs the "Claude Code asks codex" link. The package files are next to
+this SKILL.md (`files/` one level above `skill/`) or in `~/.claude/codex-cli/` after installation.
+That directory is called `$PKG` below.
 
-**Ничего не ставь и не переписывай молча.** Каждый шаг, который меняет файл или ставит софт,
-сначала показывай, потом делай. Чтение и проверки выполняй сразу.
+**Install and rewrite nothing silently.** Every step that changes a file or installs software is
+shown first, then done. Reads and checks run immediately.
 
-**Переменные оболочки между вызовами Bash не сохраняются.** Где ниже нужен путь или id из
-прошлого шага, подставляй его значение явно.
+**Shell variables do not survive between Bash calls.** Where a path or id from a previous step is
+needed below, substitute its value explicitly.
 
-## 0. Что уже есть
+## 0. What is already there
 
-Каталог codex: `CODEX_HOME`, если задан, иначе `~/.codex`, приведённый к абсолютному пути так
-же, как это делает обёртка. Дальше он зовётся `$CH`; вычисляй его в каждой команде заново и
-экспортируй, чтобы пробы и тесты шли в тот же каталог:
+The codex directory: `CODEX_HOME` if set, otherwise `~/.codex`, resolved to an absolute path the
+same way the wrapper does it. It is called `$CH` below; compute it again in every command and
+export it, so that probes and tests use the same directory:
 
 ```bash
 export CODEX_HOME="$(python3 -c 'import os,pathlib; print(pathlib.Path(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")).resolve())')"; CH="$CODEX_HOME"
 ```
 
-Везде ниже и в установленных правилах `~/.codex` означает `$CH`.
+Everywhere below and in the installed rules, `~/.codex` means `$CH`.
 
-Собери картину одной пачкой и покажи пользователю таблицей «есть / нет»:
+Collect the picture in one batch and show it to the user as a "present / missing" table:
 
 ```bash
 export CODEX_HOME="$(python3 -c 'import os,pathlib; print(pathlib.Path(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")).resolve())')"; CH="$CODEX_HOME"; echo "codex home: $CH"
 which codex && codex --version
 codex login status
-python3 -c 'import sys; print(sys.version); assert sys.version_info >= (3, 7), "нужен Python 3.7+"'
+python3 -c 'import sys; print(sys.version); assert sys.version_info >= (3, 7), "Python 3.7+ required"'
 ls -la ~/.claude/bin/codex-ask 2>&1 && grep -n '^DEFAULT_MODEL' ~/.claude/bin/codex-ask
-grep -n -E 'codex \(CLI через|codex MCP \(mcp__codex__codex' ~/.claude/CLAUDE.md 2>/dev/null
+grep -n -E 'codex \(CLI through|codex \(CLI через|codex MCP \(mcp__codex__codex' ~/.claude/CLAUDE.md 2>/dev/null
 grep -n -E '^model *=|^model_reasoning_effort *=|web_search' "$CH/config.toml" 2>/dev/null
 ```
 
-Остатки старой MCP-связки - по имени `codex` **и** по команде `codex mcp-server`, во всех
-scope: user и local (`~/.claude.json`), project (`.mcp.json` в корнях проектов), хуки в
-пользовательских и проектных настройках:
+Leftovers of the old MCP setup - by the name `codex` **and** by the command `codex mcp-server`, in
+every scope: user and local (`~/.claude.json`), project (`.mcp.json` in project roots), hooks in
+user and project settings:
 
 ```bash
 python3 - <<'EOF'
@@ -81,17 +81,17 @@ claude mcp list 2>&1 | grep -i codex
 ls -d ~/.claude/skills/codex-mcp ~/.claude/codex-mcp ~/.claude/hooks/codex-compact-watcher.py 2>/dev/null
 ```
 
-Дальше делай только недостающее или устаревшее.
+From here on, do only what is missing or outdated.
 
-## 1. Резервные копии - до любой правки
+## 1. Backups - before any edit
 
-Перед первым изменяющим шагом скопируй **каждый** файл, который будешь менять, с уникальным
-суффиксом и проверь, что копия легла. Ошибку копирования не глушить:
+Before the first modifying step, copy **every** file you are going to change, with a unique
+suffix, and verify the copy landed. Do not swallow a copy error:
 
 ```bash
 set -e
 export CODEX_HOME="$(python3 -c 'import os,pathlib; print(pathlib.Path(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")).resolve())')"
-B=$(mktemp -d "$HOME/.claude/codex-cli-backup-$(date +%Y%m%d)-XXXXXX")   # новый каталог на каждый запуск
+B=$(mktemp -d "$HOME/.claude/codex-cli-backup-$(date +%Y%m%d)-XXXXXX")   # a new directory on every run
 for f in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" "$HOME/.claude.json" \
          "$CODEX_HOME/config.toml" "$HOME/.claude/bin/codex-ask"; do
   if [ -e "$f" ]; then
@@ -102,55 +102,55 @@ for f in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" "$HOME/.claude.
 done
 ```
 
-Если скрипт напечатал `BACKUP FAILED` или вышел не с 0 - остановись и ничего не меняй.
+If the script printed `BACKUP FAILED` or exited non-zero, stop and change nothing.
 
-Проектные `.mcp.json` и `.claude/settings*.json` из шага 0 копируй в тот же каталог `$B` перед
-их правкой.
-Файла нет - копировать нечего. Скажи пользователю, куда легли копии.
+Copy the project-level `.mcp.json` and `.claude/settings*.json` files found in step 0 into the
+same `$B` directory before editing them.
+A file that does not exist has nothing to back up. Tell the user where the copies went.
 
 ## 2. codex CLI
 
-Нужен `codex` в PATH; связка проверена на `codex-cli 0.155.1`. Если его нет - **не ставь сам**,
-предложи и дождись ответа: `npm i -g @openai/codex` или `brew install codex`. На другой версии
-работоспособность подтверждает только дымовой тест (шаг 8). Не предлагай откатывать codex ради
-`mcp-server`: старые сборки не обслуживают свежие модели.
+`codex` must be in PATH; the link is verified with `codex-cli 0.155.1`. If it is missing, **do not
+install it yourself** - propose and wait for an answer: `npm i -g @openai/codex` or
+`brew install codex`. On any other version only the smoke test (step 8) confirms it works. Do not
+propose downgrading codex to get `mcp-server` back: older builds do not serve current models.
 
-## 3. Авторизация
+## 3. Authentication
 
-`codex login status` должен показать аккаунт. Если нет - **сам залогинить не можешь**, это
-интерактивный вход в браузере. Попроси выполнить в этой сессии: `! codex login`.
-Нужен ChatGPT-план с доступом к Codex.
+`codex login status` must show an account. If it does not, **you cannot log in yourself** - it is
+an interactive browser login. Ask the user to run in this session: `! codex login`.
+A ChatGPT plan with Codex access is required.
 
-## 4. Модель и конфиг codex
+## 4. Model and codex config
 
-Проверь основную и запасную модель на этом аккаунте:
+Check the primary and the fallback model on this account:
 
 ```bash
-codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'ответь одним словом: ok'
-codex exec --skip-git-repo-check --sandbox read-only --model gpt-5.6-sol 'ответь одним словом: ok'
+codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'reply with one word: ok'
+codex exec --skip-git-repo-check --sandbox read-only --model gpt-5.6-sol 'reply with one word: ok'
 ```
 
-`--skip-git-repo-check` обязателен: без него `codex exec` откажется работать вне
-git-репозитория, и отказ запуска легко принять за отказ модели.
+`--skip-git-repo-check` is mandatory: without it `codex exec` refuses to run outside a git
+repository, and that refusal is easy to mistake for a model refusal.
 
-Сначала отличи недоступность модели от временных сбоев: ошибки авторизации, сети или лимита
-(`access token`, `rate limit`, таймаут) - не повод менять модель; устрани причину и повтори.
-Решение принимай только по ответам и по `... is not supported ...`:
+First separate model unavailability from transient failures: auth, network or rate-limit errors
+(`access token`, `rate limit`, timeout) are no reason to change the model; fix the cause and
+retry. Decide only by the answers and by `... is not supported ...`:
 
-- Обе ответили -> `<MODEL>` = `gpt-6-astra`, `<FALLBACK>` = `gpt-5.6-sol`.
-- Ответила только `gpt-6-astra` -> она основная, запасной нет.
-- Ответила только `gpt-5.6-sol` -> она основная, запасной нет.
-- `... is not supported when using Codex with a ChatGPT account` у обеих -> покажи слаги из
-  `$CH/models_cache.json` (поле `slug`) и **спроси**, какие ставить.
-- `The '<модель>' model requires a newer version of Codex` -> старый codex, предложи обновить.
+- Both answered -> `<MODEL>` = `gpt-6-astra`, `<FALLBACK>` = `gpt-5.6-sol`.
+- Only `gpt-6-astra` answered -> it is the primary, there is no fallback.
+- Only `gpt-5.6-sol` answered -> it is the primary, there is no fallback.
+- `... is not supported when using Codex with a ChatGPT account` for both -> show the slugs from
+  `$CH/models_cache.json` (field `slug`) and **ask** which ones to use.
+- `The '<model>' model requires a newer version of Codex` -> old codex, propose an update.
 
-В `$CH/config.toml` должны быть `model = "<MODEL>"` и `model_reasoning_effort = "high"`
-(пример - `$PKG/files/codex-config.example.toml`; целиком поверх не копировать). Если там
-`[features] web_search_request = true` (в 0.155.1 ключ устарел и печатает предупреждение на
-каждом вызове) - предложи заменить его на верхнеуровневый `web_search = "live"`, чтобы
-сохранить поведение. Уже заданный `web_search` не трогай.
+`$CH/config.toml` must contain `model = "<MODEL>"` and `model_reasoning_effort = "high"` (example:
+`$PKG/files/codex-config.example.toml`; do not copy it over the whole file). If it has
+`[features] web_search_request = true` (deprecated in 0.155.1, prints a warning on every call),
+propose replacing it with the top-level `web_search = "live"` to keep the behaviour. Do not touch
+an already set `web_search`.
 
-## 5. Обёртка codex-ask
+## 5. The codex-ask wrapper
 
 ```bash
 mkdir -p ~/.claude/bin
@@ -158,61 +158,64 @@ cp "$PKG/files/bin/codex-ask" ~/.claude/bin/codex-ask
 chmod +x ~/.claude/bin/codex-ask
 ```
 
-Если `<MODEL>` не `gpt-6-astra` - поправь строку `DEFAULT_MODEL = ...` в начале файла и покажи
-её до и после. Затем проверь, что три места согласованы: `DEFAULT_MODEL` в обёртке, `model` в
-`$CH/config.toml` и `<MODEL>` в правилах (шаг 6).
+If `<MODEL>` is not `gpt-6-astra`, edit the `DEFAULT_MODEL = ...` line at the top of the file and
+show it before and after. Then check that three places agree: `DEFAULT_MODEL` in the wrapper,
+`model` in `$CH/config.toml` and `<MODEL>` in the rules (step 6).
 
-## 6. Правила в CLAUDE.md
+## 6. Rules in CLAUDE.md
 
-Возьми `$PKG/files/CLAUDE.codex.md` и заполни плейсхолдеры: `<MODEL>` - основной слаг,
-`<FALLBACK>` - запасной. Если запасной нет, удали всё, что о ней говорит: оговорку о запасной в
-списке запретов, пункт о переходе на запасную и слова «только по правилу о запасной модели
-ниже» в начале раздела о модели. Плейсхолдеров в итоговом тексте остаться не должно:
+Take `$PKG/files/CLAUDE.codex.md` and fill in the placeholders: `<MODEL>` - the primary slug,
+`<FALLBACK>` - the fallback. If there is no fallback, delete everything that mentions it: the note
+in the list of forbidden values, the item about switching to the fallback, and the words "only
+under the fallback rule below" at the start of the model section. No placeholders may remain in
+the final text:
 
 ```bash
-FILLED="/путь/к/заполненному/блоку.md"   # подставь реальный путь
-if grep -n -E '<MODEL>|<FALLBACK>' "$FILLED"; then echo "ОСТАЛИСЬ ПЛЕЙСХОЛДЕРЫ"; fi
+FILLED="/path/to/filled/block.md"   # substitute the real path
+if grep -n -E '<MODEL>|<FALLBACK>' "$FILLED"; then echo "PLACEHOLDERS LEFT"; fi
 ```
 
-Вставка в `~/.claude/CLAUDE.md` (создай файл, если его нет):
+Insertion into `~/.claude/CLAUDE.md` (create the file if it does not exist):
 
-- есть блок нового пакета (`## codex (CLI через ...`, до маркера `конец блока codex`) - замени
-  его целиком;
-- есть блок старого пакета (`## codex MCP (mcp__codex__codex ...`) - замени его новым блоком;
-- нет ни того, ни другого - допиши в конец.
+- a block from this package exists (`## codex (CLI through ...` or the older Russian
+  `## codex (CLI через ...`, up to the marker `end of codex block` or `конец блока codex`) -
+  replace it entirely;
+- a block from the old package exists (`## codex MCP (mcp__codex__codex ...`) - replace it with
+  the new block;
+- neither - append to the end.
 
-Остальные правила пользователя не трогай. Покажи diff.
+Do not touch the user's other rules. Show the diff.
 
-## 7. Снять старую MCP-связку (если шаг 0 её нашёл)
+## 7. Remove the old MCP setup (if step 0 found it)
 
-Показать и после согласия сделать:
+Show, and after consent do:
 
-- **MCP-записи во всех найденных scope:** `claude mcp remove codex -s user`; для local -
-  `claude mcp remove codex -s local`, запущенный из каталога этого проекта; для project -
-  `claude mcp remove codex -s project` из корня проекта (это меняет `.mcp.json`, общий для
-  команды, - предупреди пользователя). Если запись называлась не `codex`, удаляй по её имени.
-  После удаления повтори проверку из шага 0: scope с более высоким приоритетом может скрывать
-  ещё одну запись.
-- **Хук:** в каждом найденном файле настроек удали из `hooks.PostToolUse[*].hooks` только
-  обработчик с `codex-compact-watcher`; группу матчера удаляй, только если она осталась пустой;
-  остальные хуки не трогай. Файл `~/.claude/hooks/codex-compact-watcher.py` удаляй, когда на
-  него не ссылается ни один файл настроек. Обёртка сама сообщает о сжатии контекста.
-- **env:** `MCP_TOOL_TIMEOUT` и `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` ставил старый пакет ради
-  codex. Если других MCP-серверов с долгими вызовами нет - предложи убрать, иначе оставь.
-- **Старый пакет:** `~/.claude/skills/codex-mcp` и `~/.claude/codex-mcp`.
+- **MCP entries in every scope found:** `claude mcp remove codex -s user`; for local -
+  `claude mcp remove codex -s local` run from that project's directory; for project -
+  `claude mcp remove codex -s project` from the project root (this changes `.mcp.json`, which is
+  shared with the team - warn the user). If the entry was not named `codex`, remove it by its
+  name. After removal repeat the check from step 0: a higher-priority scope may hide another entry.
+- **Hook:** in every settings file found, remove from `hooks.PostToolUse[*].hooks` only the handler
+  with `codex-compact-watcher`; remove the matcher group only if it is left empty; leave the other
+  hooks alone. Delete `~/.claude/hooks/codex-compact-watcher.py` once no settings file references
+  it. The wrapper reports context compaction itself.
+- **env:** `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` were set by the old package
+  for codex. If there are no other MCP servers with long calls, propose removing them; otherwise
+  leave them.
+- **Old package:** `~/.claude/skills/codex-mcp` and `~/.claude/codex-mcp`.
 
-Уже открытые окна Claude Code держат запущенный старый `codex mcp-server` до перезапуска - это
-нормально.
+Claude Code windows that are already open keep the old `codex mcp-server` running until they are
+restarted - that is normal.
 
-## 8. Дымовой тест
+## 8. Smoke test
 
-Одним вызовом Bash (id треда берётся из вывода первого шага):
+In one Bash call (the thread id is taken from the first step's output):
 
 ```bash
 set -e -o pipefail
 T=$(mktemp -d)
-echo 'Запомни число 4242. Ответь одним словом: stored' > "$T/p1.txt"
-echo 'Какое число ты запомнил? Ответь только числом.' > "$T/p2.txt"
+echo 'Remember the number 4242. Reply with one word: stored' > "$T/p1.txt"
+echo 'Which number did you remember? Reply with the number only.' > "$T/p2.txt"
 ~/.claude/bin/codex-ask new --dir "$T" "$T/p1.txt" | tee "$T/r1.txt"
 ID=$(awk '/^session_id:/{print $2}' "$T/r1.txt")
 echo "$ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
@@ -221,26 +224,26 @@ echo "$ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 echo "SMOKE OK"
 ```
 
-Ожидается: оба вызова `status: ok (exit 0)`, у обоих один `session_id`, ответы `stored` и `4242`.
-Тогда модель, обёртка и продолжение треда работают.
+Expected: both calls `status: ok (exit 0)`, the same `session_id` in both, the answers `stored`
+and `4242`. Then the model, the wrapper and thread continuation all work.
 
-## 9. Отчёт
+## 9. Report
 
-Коротко: версия codex, основная и запасная модель, где обёртка, что сделано с CLAUDE.md, что
-снято от старой связки, где резервные копии. Напомни главное правило - **один тред на поток
-задач**.
+Briefly: codex version, primary and fallback model, where the wrapper is, what was done to
+CLAUDE.md, what was removed from the old setup, where the backups are. Remind the user of the main
+rule - **one thread per task flow**.
 
-## Если сломалось
+## If it breaks
 
-Подробно - `$PKG/README.md`, раздел «Режимы отказа». Кратко:
+Details: `$PKG/README.md`, section "Failure modes". In short:
 
-| Симптом | Причина | Что делать |
+| Symptom | Cause | What to do |
 |---|---|---|
-| `codex (CONNECTION_CLOSED)` или `stdin is not a terminal` при старте MCP | осталась запись `codex mcp-server`, а в codex 0.155.1+ её нет | шаг 7 |
-| `status: FAILED (exit 75)`, `BUSY` | тред занят другим вызовом | дождаться, второй не запускать |
-| `... is not supported when using Codex with a ChatGPT account` | неверный слаг | шаг 4 |
-| `... requires a newer version of Codex` | CLI старее модели | обновить codex |
-| `Your access token could not be refreshed` | протухла авторизация | один повтор, затем `! codex login` |
-| `session_id: UNKNOWN`, exit 1 | поток событий не подтвердил тред | смотреть `events.jsonl` в `out_dir` |
-| `compactions: unknown` | журнал треда не найден | проверить `CODEX_HOME` и права |
-| exit 143 / 130 | обёртку остановили сигналом | codex остановлен, тред свободен; повторить `resume` |
+| `codex (CONNECTION_CLOSED)` or `stdin is not a terminal` at MCP startup | a `codex mcp-server` entry is still registered, and codex 0.155.1+ has no such subcommand | step 7 |
+| `status: FAILED (exit 75)`, `BUSY` | the thread is in use by another call | wait; do not start a second one |
+| `... is not supported when using Codex with a ChatGPT account` | wrong slug | step 4 |
+| `... requires a newer version of Codex` | the CLI is older than the model | update codex |
+| `Your access token could not be refreshed` | auth expired | retry once, then `! codex login` |
+| `session_id: UNKNOWN`, exit 1 | the event stream did not confirm the thread | look at `events.jsonl` in `out_dir` |
+| `compactions: unknown` | the thread log was not found | check `CODEX_HOME` and permissions |
+| exit 143 / 130 | the wrapper was stopped by a signal | codex is stopped, the thread is free; run `resume` again |

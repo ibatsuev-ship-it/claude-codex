@@ -1,22 +1,22 @@
-# Пример ~/.codex/config.toml - только то, что относится к связке с Claude Code.
-# НЕ копировать поверх своего конфига: в реальном файле есть личные секции
-# (projects с trust_level, marketplaces, пути к бандлам приложения).
-# Взять отсюда model и model_reasoning_effort.
+# Example ~/.codex/config.toml - only the parts relevant to the Claude Code link.
+# Do NOT copy over your own config: the real file has personal sections
+# (projects with trust_level, marketplaces, paths to application bundles).
+# Take model and model_reasoning_effort from here.
 
-# Слаг модели. Проверять доступность так:
-#   codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'ответь: ok'
-# Без --skip-git-repo-check команда откажет вне git-репозитория - и это будет похоже
-# на отказ в доступе к модели, хотя дело не в ней.
-# Список слагов, которые обслуживает аккаунт - в ~/.codex/models_cache.json (поле slug).
+# Model slug. Check availability like this:
+#   codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'reply: ok'
+# Without --skip-git-repo-check the command refuses to run outside a git repository,
+# which looks like a model access refusal although the model is not the problem.
+# The slugs your account serves are in ~/.codex/models_cache.json (field slug).
 model = "gpt-6-astra"
 
-# Умолчание глубины рассуждений. xhigh заметно дороже и медленнее; обёртка codex-ask
-# поднимает его для отдельного треда флагом --effort xhigh.
+# Default reasoning effort. xhigh is noticeably slower and more expensive; the codex-ask
+# wrapper raises it for a single thread with --effort xhigh.
 model_reasoning_effort = "high"
 
-# Если в конфиге остался [features] web_search_request = true - замените его на
-# web_search = "live" (верхний уровень): в 0.155.1 старый ключ устарел и печатает
-# предупреждение на каждом вызове.
+# If the config still has [features] web_search_request = true, replace it with the
+# top-level web_search = "live": in 0.155.1 the old key is deprecated and prints a warning
+# on every call.
 #
-# Профили: в 0.155.1 `codex -p NAME` читает отдельный файл ~/.codex/NAME.config.toml,
-# а не таблицу [profiles.NAME] в этом файле. Обёртке профили не нужны.
+# Profiles: in 0.155.1 `codex -p NAME` reads a separate file ~/.codex/NAME.config.toml,
+# not a [profiles.NAME] table in this file. The wrapper does not use profiles.

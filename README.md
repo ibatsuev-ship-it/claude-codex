@@ -1,61 +1,63 @@
-# codex в Claude Code через CLI - как это работает
+# codex in Claude Code through the CLI - how it works
 
-Связка, в которой Claude Code во время работы спрашивает **codex** (OpenAI): второе мнение по
-коду, проверка рассуждения, спор двух моделей об одном диффе. Типовая фраза: «а кодекс согласен?».
+A setup in which Claude Code asks **codex** (OpenAI) while it works: a second opinion on code,
+a check of its reasoning, two models arguing over one diff. The typical request: "does codex agree?".
 
-Установка - в `INSTALL.md`. Здесь - устройство и режимы отказа.
+Installation is in `INSTALL.md`. This file covers the design and the failure modes.
 
-Прежняя MCP-версия пакета из этого репозитория удалена: с `codex-cli 0.155.1` она не работает.
-Её последняя редакция доступна по тегу `mcp-2026-09-07`.
+The earlier MCP version of this package has been removed from the repository: it does not work
+with `codex-cli 0.155.1`. Its last revision is available under the tag `mcp-2026-09-07`.
 
-## Почему не MCP
+## Why not MCP
 
-Прежний пакет (`codex-mcp-integration`, 07.09.2026, тег `mcp-2026-09-07`) подключал codex как MCP-сервер
-(`codex mcp-server`). В `codex-cli 0.155.1` (22.09.2026) эту подкоманду убрали: `codex mcp-server`
-теперь проваливается в интерактивный режим и падает с `stdin is not a terminal`, а Claude Code
-при старте пишет `codex (CONNECTION_CLOSED)`. Перезапуск сессии не помогает.
+The earlier package (`codex-mcp-integration`, 2026-09-07, tag `mcp-2026-09-07`) connected codex
+as an MCP server (`codex mcp-server`). `codex-cli 0.155.1` (2026-09-22) removed that subcommand:
+`codex mcp-server` now falls through to the interactive TUI and dies with
+`stdin is not a terminal`, and Claude Code reports `codex (CONNECTION_CLOSED)` at startup.
+Restarting the session does not help.
 
-Замен у MCP-режима нет: `codex app-server` - JSON-RPC демон со своим протоколом, Claude Code
-не может подключить его как MCP-сервер. Откат codex на старую версию возвращает `mcp-server`,
-но старые сборки не обслуживают свежие модели (так было с `gpt-6-astra` 05.09.2026). Поэтому
-codex вызывается как обычная программа через Bash - через обёртку `codex-ask`.
+There is no replacement for the MCP mode: `codex app-server` is a JSON-RPC daemon with its own
+protocol, and Claude Code cannot attach it as an MCP server. Downgrading codex brings
+`mcp-server` back, but older builds do not serve current models (that happened with
+`gpt-6-astra` on 2026-09-05). So codex is run as an ordinary program through Bash, via the
+`codex-ask` wrapper.
 
-## Из чего состоит
+## Components
 
-| Компонент | Где живёт | Зачем |
+| Component | Where | Purpose |
 |---|---|---|
-| `codex` CLI | в PATH (`npm i -g @openai/codex` или brew) | сам клиент Codex |
-| авторизация | `~/.codex/auth.json` | ChatGPT-план, `codex login` |
-| конфиг codex | `~/.codex/config.toml` | модель и глубина рассуждений по умолчанию |
-| обёртка | `~/.claude/bin/codex-ask` | вызов codex, id треда, проверка сжатия контекста |
-| правила | блок в `~/.claude/CLAUDE.md` | дисциплина модели и тредов - главная ценность пакета |
+| `codex` CLI | in PATH (`npm i -g @openai/codex` or brew) | the Codex client itself |
+| auth | `~/.codex/auth.json` | ChatGPT plan, `codex login` |
+| codex config | `~/.codex/config.toml` | default model and reasoning effort |
+| wrapper | `~/.claude/bin/codex-ask` | runs codex, captures the thread id, checks for context compaction |
+| rules | a block in `~/.claude/CLAUDE.md` | model and thread discipline - the main value of the package |
 
-Хука больше нет. Раньше хук `PostToolUse` искал сжатие контекста по всем сессиям codex на
-машине и не мог понять, чей это тред. Обёртка знает id своего треда и проверяет только свой
-кусок журнала.
+There is no hook any more. The old `PostToolUse` hook looked for context compaction across every
+codex session on the machine and could not tell whose thread it was. The wrapper knows its own
+thread id and checks only its own part of the log.
 
-## Что делает codex-ask
+## What codex-ask does
 
 ```
-codex-ask new    [--dir D] [--sandbox read-only|workspace-write|danger-full-access] [--network] [--effort E] [--model M] [--out P] ПРОМПТ
-codex-ask resume СЕССИЯ [--dir D] [--out P] ПРОМПТ
+codex-ask new    [--dir D] [--sandbox read-only|workspace-write|danger-full-access] [--network] [--effort E] [--model M] [--out P] PROMPT
+codex-ask resume SESSION [--dir D] [--out P] PROMPT
 ```
 
-1. Создаёт новый каталог на каждый вызов (`codex-<время>-<pid>-<случайный хвост>`) и сразу
-   печатает его путь - даже если обёртку потом убьют, результаты можно найти.
-2. Для `resume` берёт блокировку треда (`~/.cache/codex-ask/locks/<id>.lock`). Занято - сразу
-   выход 75, codex не запускается. Затем запоминает, где кончается журнал треда.
-3. Запускает `codex exec --json` (или `codex exec resume --json`) с промптом из файла на stdin,
-   события пишет в `events.jsonl`, stderr - в `stderr.log`, финальный ответ - в `answer.md`.
-4. Сигналы SIGTERM/SIGINT/SIGHUP передаёт codex; если тот не остановился за 10 секунд -
-   SIGKILL всей группе процессов. Блокировка треда на стороне codex освобождается.
-5. После выхода проверяет по событиям, что тред тот самый (ровно один UUID, на `resume` - равный
-   запрошенному), и сканирует журнал треда `~/.codex/sessions/.../rollout-*-<id>.jsonl` от
-   запомненной точки на события сжатия контекста.
-6. Печатает сводку и ответ. Код выхода - собственный codex; 75 - тред занят; 128+N - остановлен
-   сигналом N; 1 - codex вышел с 0, но ход не завершился или тред не опознан.
+1. Creates a fresh directory per call (`codex-<time>-<pid>-<random suffix>`) and prints its path
+   first - even if the wrapper is killed later, the results can still be found.
+2. For `resume`, takes the thread lock (`~/.cache/codex-ask/locks/<id>.lock`). If it is busy,
+   exits 75 at once without starting codex. Then records where the thread log currently ends.
+3. Runs `codex exec --json` (or `codex exec resume --json`) with the prompt file on stdin; events
+   go to `events.jsonl`, stderr to `stderr.log`, the final answer to `answer.md`.
+4. Forwards SIGTERM/SIGINT/SIGHUP to codex; if codex has not stopped within 10 seconds, sends
+   SIGKILL to the whole process group. The thread lock on the codex side is released.
+5. After exit, confirms from the events that the thread is the right one (exactly one UUID; on
+   `resume`, equal to the requested one) and scans the thread log
+   `~/.codex/sessions/.../rollout-*-<id>.jsonl` from the recorded point for compaction events.
+6. Prints the summary and the answer. Exit status: codex's own; 75 - thread busy; 128+N - stopped
+   by signal N; 1 - codex exited 0 but the turn did not complete or the thread was not identified.
 
-Пример сводки:
+Sample summary:
 
 ```
 out_dir: /tmp/.../codex-20260923T104243-60254-f73209
@@ -67,74 +69,77 @@ compactions: none
 ...
 ```
 
-## Два правила, ради которых всё это написано
+## The two rules this exists for
 
-### 1. Модель явная
+### 1. The model is explicit
 
-Модель пинится в `~/.codex/config.toml` и зашита в обёртку (`DEFAULT_MODEL`). Идентификатор - это
-**слаг** из `~/.codex/models_cache.json`, а не отображаемое имя: «GPT-6-Astra» - это
-`gpt-6-astra`. На `resume` обёртка модель не передаёт: тред остаётся на той, с которой создан
-(проверено на 0.155.1 - модель, песочница и effort сохраняются).
+The model is pinned in `~/.codex/config.toml` and built into the wrapper (`DEFAULT_MODEL`). The
+identifier is the **slug** from `~/.codex/models_cache.json`, not the display name: "GPT-6-Astra"
+is `gpt-6-astra`. On `resume` the wrapper does not pass a model: the thread stays on the one it
+was created with (verified on 0.155.1 - model, sandbox and effort are preserved).
 
-### 2. Один тред на поток задач
+### 2. One thread per task flow
 
-Кэш промпта у OpenAI префиксный. Продолжение треда сохраняет прежний разговор как одинаковое
-начало запроса, новый тред отправляет контекст проекта заново. Замер 28.04.2026: два свежих треда
-подряд вместо одного общего дали примерно вдвое большее время вывода. Гарантии попадания в кэш
-нет и при общем треде, но терять его там, где можно сохранить, незачем.
+The OpenAI prompt cache matches request prefixes. Continuing a thread keeps the earlier
+conversation as an identical prefix; a new thread sends the project context again. Measured
+2026-04-28: two fresh threads back to back took roughly twice the inference time of one shared
+thread. A cache hit is never guaranteed even on a shared thread, but there is no reason to lose it
+where it can be kept.
 
-## Песочница (проверено на 0.155.1)
+## Sandbox (verified on 0.155.1)
 
-- `exec` никогда не спрашивает подтверждений. Всё, что песочница не разрешает, отклоняется сразу.
-  Зависаний на «запросе прав», которые бывали под MCP, на CLI нет.
-- `read-only` (умолчание обёртки): команды агента не пишут никуда, включая проект, и не ходят в
-  сеть (DNS не резолвится).
-- `workspace-write --network`: запись в каталог запуска и сеть (`curl` отвечает 200).
-- Сам клиент codex пишет вне песочницы: журнал сессии, обновление авторизации и, для
-  git-репозиториев, записи доверия в `~/.codex/config.toml`.
+- `exec` never asks for approval. Anything the sandbox does not allow is refused immediately.
+  The "waiting for permission" hangs seen under MCP do not happen on the CLI.
+- `read-only` (the wrapper default): agent commands cannot write anywhere, project included, and
+  have no network (DNS does not resolve).
+- `workspace-write --network`: writes inside the run directory and network access (`curl` gets 200).
+- The codex client itself writes outside the sandbox: the session log, auth refresh and, for git
+  repositories, trust entries in `~/.codex/config.toml`.
 
-## Параллельные сессии Claude (проверено на 0.155.1)
+## Parallel Claude sessions (verified on 0.155.1)
 
-- Разные треды идут одновременно без конфликтов (проверено на трёх).
-- Два вызова в один тред одновременно невозможны: второй `codex-ask` получает 75 от блокировки,
-  а голый `codex exec resume` - отказ codex `already has an active writer`. Журнал не портится.
-- Квота ChatGPT-плана и `auth.json` общие для всех сессий.
+- Separate threads run concurrently without conflict (verified with three).
+- Two simultaneous calls on one thread are impossible: the second `codex-ask` gets 75 from the
+  lock, and a bare `codex exec resume` is refused by codex with `already has an active writer`.
+  The log stays intact.
+- The ChatGPT plan quota and `auth.json` are shared by all sessions.
 
-## Режимы отказа
+## Failure modes
 
-| Сообщение | Что это | Что делать |
+| Message | What it is | What to do |
 |---|---|---|
-| `codex (CONNECTION_CLOSED)` при старте Claude Code | осталась MCP-запись старого пакета | снять её (`INSTALL.md`, миграция) |
-| `stdin is not a terminal` | несуществующая подкоманда codex (например `mcp-server`) | проверить `codex --help` |
-| `status: FAILED (exit 75)`, `BUSY` | тред занят другим вызовом | дождаться, второй не запускать |
-| `'<модель>' is not supported when using Codex with a ChatGPT account` | неверный слаг или изменилось обслуживание плана | проверить слаг, при отказе - запасная модель |
-| `The '<модель>' model requires a newer version of Codex` | CLI старее модели | обновить codex |
-| `Your access token could not be refreshed…` | протухла авторизация | один повтор, затем `codex login` (из одной сессии) |
-| `session_id: UNKNOWN`, exit 1 | поток событий не подтвердил тред | посмотреть `events.jsonl` в `out_dir` |
-| `compactions: unknown` | журнал треда не найден | проверить `CODEX_HOME` и права; тред при этом может быть жив |
-| exit 130 / 143 | обёртку остановили сигналом | codex остановлен, тред свободен, можно `resume` |
+| `codex (CONNECTION_CLOSED)` at Claude Code startup | an MCP entry from the old package is still registered | remove it (`INSTALL.md`, migration) |
+| `stdin is not a terminal` | a codex subcommand that does not exist (e.g. `mcp-server`) | check `codex --help` |
+| `status: FAILED (exit 75)`, `BUSY` | the thread is in use by another call | wait; do not start a second one |
+| `'<model>' is not supported when using Codex with a ChatGPT account` | wrong slug, or the plan's model list changed | check the slug; if still refused, use the fallback model |
+| `The '<model>' model requires a newer version of Codex` | the CLI is older than the model | update codex |
+| `Your access token could not be refreshed…` | auth expired | retry once, then `codex login` (from one session only) |
+| `session_id: UNKNOWN`, exit 1 | the event stream did not confirm the thread | look at `events.jsonl` in `out_dir` |
+| `compactions: unknown` | the thread log was not found | check `CODEX_HOME` and permissions; the thread may still be alive |
+| exit 130 / 143 | the wrapper was stopped by a signal | codex is stopped, the thread is free, `resume` works |
 
-Упавший вызов сам по себе тред не портит. Новый тред нужен, когда codex сам говорит, что сессии
-нет, когда меняется модель, каталог или песочница, или когда после сжатия контекста тред
-отвечает по утерянным деталям. Данные тогда надо прислать заново.
+A failed call does not by itself corrupt the thread. A new thread is needed when codex itself
+says the session does not exist, when the model, directory or sandbox changes, or when after a
+context compaction the thread keeps answering from lost details. The evidence must then be sent
+again.
 
-## Таймауты
+## Timeouts
 
-Bash-инструмент Claude Code обрывает команду переднего плана через 10 минут. Длинные ревью
-(xhigh, большие диффы) Claude запускает в фоне, перенаправив вывод обёртки в файл, и читает его
-по уведомлению о завершении. Переменные `MCP_TOOL_TIMEOUT` и
-`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` из старого пакета на эту связку не влияют.
+The Claude Code Bash tool cuts a foreground command off after 10 minutes. Long reviews (xhigh,
+big diffs) are run in the background with the wrapper's output redirected to a file, which is
+read when the completion notification arrives. The `MCP_TOOL_TIMEOUT` and
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` variables from the old package have no effect on this setup.
 
-## Чего в пакете нет намеренно
+## Deliberately not included
 
-- **`~/.codex/auth.json`** - у каждого свой, ставится через `codex login`.
-- **Полный `~/.codex/config.toml`** - в нём личные `projects` с уровнями доверия и пути к бандлам
-  приложения. В пакете только пример.
-- **Плагины codex** - к связке с Claude Code отношения не имеют.
+- **`~/.codex/auth.json`** - personal, created by `codex login`.
+- **A full `~/.codex/config.toml`** - it holds personal `projects` with trust levels and paths to
+  application bundles. The package ships only an example.
+- **codex plugins** - unrelated to the Claude Code integration.
 
-## Архив для раздачи
+## Distribution archive
 
-Собирается из закоммиченного состояния, без рабочих файлов и `.DS_Store`:
+Built from the committed state, without working files or `.DS_Store`:
 
 ```bash
 git archive --prefix=codex-cli-integration/ -o ../codex-cli-integration-$(date +%F).zip HEAD

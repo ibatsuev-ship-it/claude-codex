@@ -1,26 +1,26 @@
-# Подключить codex к Claude Code - установка
+# Connecting codex to Claude Code - installation
 
-Пакет ставит связку, в которой Claude Code во время работы может спросить codex: «а кодекс
-согласен?». Как это устроено - в `README.md`. Здесь только установка.
+The package sets up a link in which Claude Code can ask codex while it works: "does codex agree?".
+How it is built is in `README.md`. This file is installation only.
 
-Ставится в два шага: разложить файлы, потом сказать Claude «подруби кодекс» - дальше он всё
-сделает сам и покажет, что именно меняет. Если у вас стоял прежний пакет
-`codex-mcp-integration`, тот же шаг его снимет.
+Two steps: put the files in place, then tell Claude "set up codex" - it does the rest itself and
+shows what it changes. If the earlier `codex-mcp-integration` package was installed, the same step
+removes it.
 
-## 0. Что нужно заранее
+## 0. Prerequisites
 
 - **Claude Code**.
-- **Доступ к Codex** по ChatGPT-плану (`codex login`). Аккаунт у каждого свой - токены в пакет не
-  входят.
-- **codex CLI** (проверено на `codex-cli 0.155.1`; на другой версии работоспособность подтверждает
-  только дымовой тест): `npm i -g @openai/codex` или `brew install codex`.
-  Если пользуешься приложением Codex.app - CLI всё равно нужен отдельно, в PATH.
-- **Python 3.7+** - для обёртки, только стандартная библиотека.
-- macOS или Linux.
+- **Codex access** on a ChatGPT plan (`codex login`). Accounts are personal - no tokens ship with
+  the package.
+- **codex CLI** (verified with `codex-cli 0.155.1`; on any other version only the smoke test
+  confirms it works): `npm i -g @openai/codex` or `brew install codex`.
+  If you use the Codex.app desktop application, the CLI is still needed separately, in PATH.
+- **Python 3.7+** for the wrapper, standard library only.
+- macOS or Linux.
 
-## 1. Разложить файлы
+## 1. Put the files in place
 
-Из корня клона репозитория или распакованного архива:
+From the root of the cloned repository or the unpacked archive:
 
 ```bash
 mkdir -p ~/.claude/skills
@@ -30,62 +30,62 @@ cp -r files     ~/.claude/codex-cli/files
 cp    README.md ~/.claude/codex-cli/
 ```
 
-Ставишь поверх старой версии этого пакета - сначала удали `~/.claude/skills/codex-cli` и
-`~/.claude/codex-cli`, иначе `cp -r` положит копию внутрь.
+Installing over an earlier version of this package: delete `~/.claude/skills/codex-cli` and
+`~/.claude/codex-cli` first, otherwise `cp -r` puts a copy inside them.
 
-## 2. Перезапустить Claude Code
+## 2. Restart Claude Code
 
-Скиллы подхватываются при старте сессии.
+Skills are picked up when a session starts.
 
-## 3. Сказать «подруби кодекс»
+## 3. Say "set up codex"
 
 ```
-подруби кодекс
+set up codex
 ```
 
-(или явно: `/codex-cli`)
+(or explicitly: `/codex-cli`)
 
-Claude пройдёт по шагам сам:
+Claude goes through the steps itself:
 
-1. проверит, что стоит и чего не хватает, найдёт остатки старой MCP-связки, покажет таблицей;
-2. если нет CLI - предложит команду установки и **дождётся согласия**;
-3. если нет авторизации - попросит выполнить `! codex login`;
-4. проверит, какая модель реально обслуживается планом, и запинит её;
-5. положит обёртку `~/.claude/bin/codex-ask`;
-6. до любых правок сделает резервные копии, затем допишет блок правил в `~/.claude/CLAUDE.md`
-   (старый блок «codex MCP» или прежнюю версию блока заменит), показывая diff;
-7. снимет старую MCP-связку во всех scope (user, local, project), хук `codex-compact-watcher`
-   и старый скилл `codex-mcp`;
-8. проведёт дымовой тест: новый тред и продолжение того же треда.
+1. checks what is installed and what is missing, finds leftovers of the old MCP setup, shows a table;
+2. if the CLI is missing, proposes the install command and **waits for consent**;
+3. if not logged in, asks you to run `! codex login`;
+4. checks which model the plan actually serves and pins it;
+5. installs the wrapper `~/.claude/bin/codex-ask`;
+6. backs up every file before touching it, then adds the rules block to `~/.claude/CLAUDE.md`
+   (replacing the old "codex MCP" block or an earlier version of this block), showing the diff;
+7. removes the old MCP setup in every scope (user, local, project), the `codex-compact-watcher`
+   hook and the old `codex-mcp` skill;
+8. runs a smoke test: a new thread, then a continuation of the same thread.
 
-**Правила в `CLAUDE.md` - не формальность.** Там дисциплина тредов: продолжение треда сохраняет
-контекст и шанс попасть в кэш промпта, а привычка заводить новый тред на каждый вопрос оплачивает
-контекст проекта заново. Не выкидывай этот блок.
+**The rules in `CLAUDE.md` are not a formality.** They hold the thread discipline: continuing a
+thread keeps the context and the chance of a prompt-cache hit, while the habit of opening a new
+thread for every question pays for the project context again. Do not drop that block.
 
-## 4. Проверить, что живо
+## 4. Check that it is alive
 
 ```bash
-TMP=$(mktemp -d); echo 'Ответь одним словом: ok' > "$TMP/p.txt"
+TMP=$(mktemp -d); echo 'Reply with one word: ok' > "$TMP/p.txt"
 ~/.claude/bin/codex-ask new --dir "$TMP" "$TMP/p.txt"
 ```
 
-Ожидается `status: ok (exit 0)` и ответ `ok`. Дальше в диалоге достаточно попросить: «спроси
-кодекс, согласен ли он с этим кодом».
+Expect `status: ok (exit 0)` and the answer `ok`. From then on it is enough to ask in the
+conversation: "ask codex whether it agrees with this code".
 
-## Если что-то сломалось
+## If something breaks
 
-Скажи «почини codex» - тот же скилл содержит таблицу диагностики. Разбор ошибок - `README.md`,
-раздел «Режимы отказа».
+Say "fix codex" - the same skill has a diagnostics table. Error details are in `README.md`,
+section "Failure modes".
 
-## Что в пакете
+## Package contents
 
 ```
-INSTALL.md                          этот файл
-README.md                           как устроена связка, режимы отказа
-skill/codex-cli/SKILL.md            скилл «подруби кодекс» - установка, миграция и починка
-files/bin/codex-ask                 обёртка вызова codex
-files/CLAUDE.codex.md               блок правил для ~/.claude/CLAUDE.md
-files/codex-config.example.toml     выжимка из ~/.codex/config.toml
+INSTALL.md                          this file
+README.md                           how the link is built, failure modes
+skill/codex-cli/SKILL.md            the "set up codex" skill - install, migrate, repair
+files/bin/codex-ask                 the codex wrapper
+files/CLAUDE.codex.md               the rules block for ~/.claude/CLAUDE.md
+files/codex-config.example.toml     excerpt of ~/.codex/config.toml
 ```
 
-Токенов, ключей и личных путей в пакете нет.
+No tokens, keys or personal paths are included.
