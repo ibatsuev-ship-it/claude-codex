@@ -30,7 +30,24 @@ protocol, and Claude Code cannot attach it as an MCP server. Downgrading codex b
 | auth | `~/.codex/auth.json` | ChatGPT plan, `codex login` |
 | codex config | `~/.codex/config.toml` | default model and reasoning effort |
 | wrapper | `~/.claude/bin/codex-ask` | runs codex, captures the thread id, checks for context compaction |
-| rules | a block in `~/.claude/CLAUDE.md` | model and thread discipline - the main value of the package |
+| rules | `~/.claude/codex-rules.md`, imported from `~/.claude/CLAUDE.md` | model and thread discipline - the main value of the package |
+
+The rules file belongs to the package: the skill overwrites it on every update. `~/.claude/CLAUDE.md`
+holds only the import line and, under it, the user's own overrides, which the skill never touches:
+
+```
+## codex
+
+@~/.claude/codex-rules.md
+
+Local overrides (take precedence over the imported codex rules):
+- ...
+```
+
+The file lives outside `~/.claude/codex-cli/` because updating the package moves that directory
+aside.
+It is loaded into every session, so it holds only what a normal call needs; diagnostics live in
+this README.
 
 There is no hook any more. The old `PostToolUse` hook looked for context compaction across every
 codex session on the machine and could not tell whose thread it was. The wrapper knows its own
@@ -76,7 +93,18 @@ compactions: none
 The model is pinned in `~/.codex/config.toml` and built into the wrapper (`DEFAULT_MODEL`). The
 identifier is the **slug** from `~/.codex/models_cache.json`, not the display name: "GPT-6-Astra"
 is `gpt-6-astra`. On `resume` the wrapper does not pass a model: the thread stays on the one it
-was created with (verified on 0.155.1 - model, sandbox and effort are preserved).
+was created with (verified on 0.155.1 - model, sandbox and effort are preserved). The CLI would
+accept `--model` or `-c` on resume, which is exactly why the wrapper does not pass them.
+
+Fallback: on `'<model>' is not supported when using Codex with a ChatGPT account`, retry once on a
+fresh thread; if it is refused again, start a new thread with `codex-ask new --model <fallback>`
+and tell the user that the primary model is broken. The fallback slug is the one named in
+`~/.claude/codex-rules.md`, chosen at install time (skill step 4). If the rules name no fallback,
+there is none: report the refusal and stop - do not pick another model on your own. The fallback
+is never a default.
+
+Profiles: in 0.155.1 `-p NAME` layers the file `$CODEX_HOME/NAME.config.toml`; the old
+`[profiles.*]` tables in `config.toml` are not what `-p` loads. The wrapper uses no profile.
 
 ### 2. One thread per task flow
 
@@ -92,7 +120,9 @@ where it can be kept.
   The "waiting for permission" hangs seen under MCP do not happen on the CLI.
 - `read-only` (the wrapper default): agent commands cannot write anywhere, project included, and
   have no network (DNS does not resolve).
-- `workspace-write --network`: writes inside the run directory and network access (`curl` gets 200).
+- `workspace-write --network`: writes inside the run directory, plus temp and any configured
+  writable roots, and network access (`curl` gets 200). For network without write access to the
+  project, run with `--dir` set to a temporary directory outside the project.
 - The codex client itself writes outside the sandbox: the session log, auth refresh and, for git
   repositories, trust entries in `~/.codex/config.toml`.
 
@@ -111,7 +141,8 @@ where it can be kept.
 | `codex (CONNECTION_CLOSED)` at Claude Code startup | an MCP entry from the old package is still registered | remove it (`INSTALL.md`, migration) |
 | `stdin is not a terminal` | a codex subcommand that does not exist (e.g. `mcp-server`) | check `codex --help` |
 | `status: FAILED (exit 75)`, `BUSY` | the thread is in use by another call | wait; do not start a second one |
-| `'<model>' is not supported when using Codex with a ChatGPT account` | wrong slug, or the plan's model list changed | check the slug; if still refused, use the fallback model |
+| `already has an active writer` | a bare `codex exec resume` hit a thread that is in use | same as `BUSY`; go through the wrapper |
+| `'<model>' is not supported when using Codex with a ChatGPT account` | wrong slug, or the plan's model list changed | check the slug; if still refused, the fallback procedure above |
 | `The '<model>' model requires a newer version of Codex` | the CLI is older than the model | update codex |
 | `Your access token could not be refreshed…` | auth expired | retry once, then `codex login` (from one session only) |
 | `session_id: UNKNOWN`, exit 1 | the event stream did not confirm the thread | look at `events.jsonl` in `out_dir` |
@@ -127,7 +158,8 @@ again.
 
 The Claude Code Bash tool cuts a foreground command off after 10 minutes. Long reviews (xhigh,
 big diffs) are run in the background with the wrapper's output redirected to a file, which is
-read when the completion notification arrives. The `MCP_TOOL_TIMEOUT` and
+read when the completion notification arrives. If the wrapper itself was killed with SIGKILL,
+there is no summary: look in `out_dir`, which is printed first. The `MCP_TOOL_TIMEOUT` and
 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` variables from the old package have no effect on this setup.
 
 ## Deliberately not included
