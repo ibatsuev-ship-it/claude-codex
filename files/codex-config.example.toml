@@ -4,11 +4,11 @@
 # Take model and model_reasoning_effort from here.
 
 # Model slug. Check availability like this:
-#   codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'reply: ok'
+#   codex exec --skip-git-repo-check --sandbox read-only --model gpt-6.2-astra 'reply: ok'
 # Without --skip-git-repo-check the command refuses to run outside a git repository,
 # which looks like a model access refusal although the model is not the problem.
 # The slugs your account serves are in ~/.codex/models_cache.json (field slug).
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 
 # Default reasoning effort. xhigh is noticeably slower and more expensive; the codex-ask
 # wrapper raises it for a single thread with --effort xhigh.

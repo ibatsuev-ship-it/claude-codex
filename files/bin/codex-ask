@@ -33,8 +33,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_MODEL = "gpt-6-astra"  # set by the installer; see the codex rules in ~/.claude/CLAUDE.md
+DEFAULT_MODEL = "gpt-6.2-astra"  # set by the installer; see the codex rules in ~/.claude/CLAUDE.md
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 EXIT_BUSY = 75
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BUSY_TEXT = "already has an active writer"
@@ -68,6 +69,53 @@ def find_rollout(home: Path, session_id: str) -> Path | None:
     if not hits:
         return None
     return max(hits, key=lambda p: p.stat().st_mtime)
+
+
+def thread_settings(path: Path) -> dict | None:
+    """Model, effort and sandbox the thread was created with: its first
+    turn_context. Newer codex applies the config defaults on resume instead of
+    the thread's own settings, so the wrapper passes these back explicitly."""
+    try:
+        with path.open("rb") as fh:
+            for raw in fh:
+                if b'"turn_context"' not in raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("type") == "turn_context":
+                    payload = ev.get("payload")
+                    return payload if isinstance(payload, dict) else None
+    except OSError:
+        pass
+    return None
+
+
+def pin_args(ctx: dict | None) -> tuple[list[str], list[str]]:
+    """(codex args that restore the thread's settings, names of settings not found)."""
+    ctx = ctx or {}
+    args: list[str] = []
+    missing: list[str] = []
+    model, effort = ctx.get("model"), ctx.get("effort")
+    policy = ctx.get("sandbox_policy") if isinstance(ctx.get("sandbox_policy"), dict) else {}
+    sandbox = policy.get("type")
+    if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._:-]+", model):
+        args += ["-m", model]
+    else:
+        missing.append("model")
+    if sandbox in SANDBOXES:
+        args += ["-c", f'sandbox_mode="{sandbox}"']
+        if sandbox == "workspace-write":
+            net = "true" if policy.get("network_access") is True else "false"
+            args += ["-c", f"sandbox_workspace_write.network_access={net}"]
+    else:
+        missing.append("sandbox")
+    if isinstance(effort, str) and re.fullmatch(r"[a-z]+", effort):
+        args += ["-c", f'model_reasoning_effort="{effort}"']
+    elif "effort" not in ctx or effort is not None:  # null: created without an explicit effort
+        missing.append("effort")
+    return args, missing
 
 
 def snapshot(path: Path) -> tuple[int, int]:
@@ -171,7 +219,7 @@ def main() -> int:
         if name == "new":
             p.add_argument("--model", default=DEFAULT_MODEL)
             p.add_argument("--sandbox", default="read-only",
-                           choices=["read-only", "workspace-write", "danger-full-access"])
+                           choices=list(SANDBOXES))
             p.add_argument("--network", action="store_true",
                            help="allow network; requires --sandbox workspace-write")
             p.add_argument("--effort", choices=EFFORTS, help="reasoning effort override")
@@ -203,6 +251,8 @@ def main() -> int:
 
     lock_fh = None
     before = None  # (path, inode, offset) of the resumed rollout
+    pinned: list[str] = []  # args that keep a resumed thread on its own settings
+    unpinned: list[str] = []
     if session_arg:
         lock_dir = Path.home() / ".cache" / "codex-ask" / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
@@ -222,6 +272,7 @@ def main() -> int:
                 before = (path, ino, off)
         except OSError:
             before = None
+        pinned, unpinned = pin_args(thread_settings(before[0]) if before else None)
 
     cmd = ["codex", "exec"]
     if session_arg:
@@ -235,7 +286,7 @@ def main() -> int:
             cmd += ["-c", f'model_reasoning_effort="{a.effort}"']
         cmd += ["-"]
     else:
-        cmd += [session_arg, "-"]
+        cmd += pinned + [session_arg, "-"]
 
     child: subprocess.Popen | None = None
     stop_signal = [0]
@@ -298,6 +349,9 @@ def main() -> int:
         rc = 1
 
     notes: list[str] = []
+    if unpinned:
+        notes.append("could not read the thread's own " + ", ".join(unpinned) + " from its rollout - "
+                     "for those this resume ran on the ~/.codex/config.toml defaults")
     distinct = list(dict.fromkeys(ids))
     identity_ok = len(distinct) == 1 and bool(UUID_RE.match(distinct[0])) and (
         session_arg is None or distinct[0] == session_arg)

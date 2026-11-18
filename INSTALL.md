@@ -12,7 +12,7 @@ removes it.
 - **Claude Code**.
 - **Codex access** on a ChatGPT plan (`codex login`). Accounts are personal - no tokens ship with
   the package.
-- **codex CLI** (verified with `codex-cli 0.155.1`; on any other version only the smoke test
+- **codex CLI** (verified with `codex-cli 0.169.1`; on any other version only the smoke test
   confirms it works): `npm i -g @openai/codex` or `brew install codex`.
   If you use the Codex.app desktop application, the CLI is still needed separately, in PATH.
 - **Python 3.7+** for the wrapper, standard library only.

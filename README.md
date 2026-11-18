@@ -91,10 +91,14 @@ compactions: none
 ### 1. The model is explicit
 
 The model is pinned in `~/.codex/config.toml` and built into the wrapper (`DEFAULT_MODEL`). The
-identifier is the **slug** from `~/.codex/models_cache.json`, not the display name: "GPT-6-Astra"
-is `gpt-6-astra`. On `resume` the wrapper does not pass a model: the thread stays on the one it
-was created with (verified on 0.155.1 - model, sandbox and effort are preserved). The CLI would
-accept `--model` or `-c` on resume, which is exactly why the wrapper does not pass them.
+identifier is the **slug** from `~/.codex/models_cache.json`, not the display name: "GPT-6.2-Astra"
+is `gpt-6.2-astra`. On `resume` the caller cannot set a model, sandbox or effort: the thread
+stays on the ones it was created with. codex itself kept them on 0.155.1, but on 0.169.1 a bare
+`codex exec resume` applies the `config.toml` defaults instead (verified 2026-11-18), so the wrapper
+reads the thread's first `turn_context` from its rollout and passes the model (`-m`), sandbox
+(`-c sandbox_mode=...`, plus `sandbox_workspace_write.network_access`) and effort
+(`-c model_reasoning_effort=...`) back explicitly. If the rollout cannot be read, it prints a
+`warning:` saying which settings fell back to the defaults.
 
 Fallback: on `'<model>' is not supported when using Codex with a ChatGPT account`, retry once on a
 fresh thread; if it is refused again, start a new thread with `codex-ask new --model <fallback>`

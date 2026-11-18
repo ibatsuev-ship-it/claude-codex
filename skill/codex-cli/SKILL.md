@@ -111,7 +111,7 @@ A file that does not exist has nothing to back up. Tell the user where the copie
 
 ## 2. codex CLI
 
-`codex` must be in PATH; the link is verified with `codex-cli 0.155.1`. If it is missing, **do not
+`codex` must be in PATH; the link is verified with `codex-cli 0.169.1`. If it is missing, **do not
 install it yourself** - propose and wait for an answer: `npm i -g @openai/codex` or
 `brew install codex`. On any other version only the smoke test (step 8) confirms it works. Do not
 propose downgrading codex to get `mcp-server` back: older builds do not serve current models.
@@ -127,7 +127,7 @@ A ChatGPT plan with Codex access is required.
 Check the primary and the fallback model on this account:
 
 ```bash
-codex exec --skip-git-repo-check --sandbox read-only --model gpt-6-astra 'reply with one word: ok'
+codex exec --skip-git-repo-check --sandbox read-only --model gpt-6.2-astra 'reply with one word: ok'
 codex exec --skip-git-repo-check --sandbox read-only --model gpt-5.6-sol 'reply with one word: ok'
 ```
 
@@ -138,8 +138,8 @@ First separate model unavailability from transient failures: auth, network or ra
 (`access token`, `rate limit`, timeout) are no reason to change the model; fix the cause and
 retry. Decide only by the answers and by `... is not supported ...`:
 
-- Both answered -> `<MODEL>` = `gpt-6-astra`, `<FALLBACK>` = `gpt-5.6-sol`.
-- Only `gpt-6-astra` answered -> it is the primary, there is no fallback.
+- Both answered -> `<MODEL>` = `gpt-6.2-astra`, `<FALLBACK>` = `gpt-5.6-sol`.
+- Only `gpt-6.2-astra` answered -> it is the primary, there is no fallback.
 - Only `gpt-5.6-sol` answered -> it is the primary, there is no fallback.
 - `... is not supported when using Codex with a ChatGPT account` for both -> show the slugs from
   `$CH/models_cache.json` (field `slug`) and **ask** which ones to use.
@@ -162,7 +162,7 @@ cp "$PKG/files/bin/codex-ask" ~/.claude/bin/codex-ask
 chmod +x ~/.claude/bin/codex-ask
 ```
 
-If `<MODEL>` is not `gpt-6-astra`, edit the `DEFAULT_MODEL = ...` line at the top of the file and
+If `<MODEL>` is not `gpt-6.2-astra`, edit the `DEFAULT_MODEL = ...` line at the top of the file and
 show it before and after. Then check that three places agree: `DEFAULT_MODEL` in the wrapper,
 `model` in `$CH/config.toml` and `<MODEL>` in the rules (step 6).
 
